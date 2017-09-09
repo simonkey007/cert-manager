@@ -101,7 +101,7 @@ func (c *Controller) Run(workers int, stopCh <-chan struct{}) error {
 	for i := 0; i < workers; i++ {
 		c.workerWg.Add(1)
 		// TODO (@munnerz): make time.Second duration configurable
-		go wait.Until(c.worker, time.Second, stopCh)
+		go wait.Until(c.worker(stopCh), time.Second, stopCh)
 	}
 	<-stopCh
 	glog.V(4).Infof("Shutting down queue as workqueue signaled shutdown")
@@ -112,39 +112,41 @@ func (c *Controller) Run(workers int, stopCh <-chan struct{}) error {
 	return nil
 }
 
-func (c *Controller) worker() {
-	defer c.workerWg.Done()
-	log.Printf("starting worker")
-	for {
-		obj, shutdown := c.queue.Get()
-		if shutdown {
-			break
-		}
+func (c *Controller) worker(stopCh <-chan struct{}) func() {
+	return func() {
+		defer c.workerWg.Done()
+		log.Printf("starting worker")
+		for {
+			obj, shutdown := c.queue.Get()
+			if shutdown {
+				break
+			}
 
-		err := func(obj interface{}) error {
-			defer c.queue.Done(obj)
-			var key string
-			var ok bool
-			if key, ok = obj.(string); !ok {
-				runtime.HandleError(fmt.Errorf("expected string in workqueue but got %T", obj))
+			err := func(obj interface{}) error {
+				defer c.queue.Done(obj)
+				var key string
+				var ok bool
+				if key, ok = obj.(string); !ok {
+					runtime.HandleError(fmt.Errorf("expected string in workqueue but got %T", obj))
+					return nil
+				}
+				if err := c.syncHandler(key); err != nil {
+					return err
+				}
+				c.queue.Forget(obj)
 				return nil
-			}
-			if err := c.syncHandler(key); err != nil {
-				return err
-			}
-			c.queue.Forget(obj)
-			return nil
-		}(obj)
+			}(obj)
 
-		if err != nil {
-			log.Printf("requeuing item due to error processing: %s", err.Error())
-			c.queue.AddRateLimited(obj)
-			continue
+			if err != nil {
+				log.Printf("requeuing item due to error processing: %s", err.Error())
+				c.queue.AddRateLimited(obj)
+				continue
+			}
+
+			log.Printf("finished processing work item")
 		}
-
-		log.Printf("finished processing work item")
+		log.Printf("exiting worker loop")
 	}
-	log.Printf("exiting worker loop")
 }
 
 func (c *Controller) processNextWorkItem(key string) error {
